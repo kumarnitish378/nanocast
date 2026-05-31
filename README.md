@@ -1,25 +1,38 @@
 # nanocast
 
-**Real-time H.264 video streaming over low-bandwidth channels.**
+**Real-time low-data-rate video for rover → ground-station radio links.**
 
-Designed for constrained links — UART at 230 kbaud, UDP, or TCP — with live encoder
-control from the receiver and telemetry feedback flowing back to the transmitter.
-Supports grayscale and color modes, multiplexed sideband channels, and per-run logging.
+Built to push usable live video through a thin, lossy radio channel — alongside
+MAVLink telemetry — and reconstruct quality at the ground station with neural
+super-resolution. The rover sends a tiny, bitrate-capped stream; the GCS upscales
+it. Transports: UART, UDP, TCP. Encoder parameters are controllable live from the
+receiver, with telemetry flowing back over multiplexed sideband channels.
+
+The core idea: **don't pay bandwidth for detail — send a small clean frame and
+synthesize the detail on the ground.**
 
 ---
 
 ## Features
 
-- H.264 encoding via libx264 (`ultrafast` + `zerolatency`) using PyAV
-- Resolution presets: 140p, 240p, 360p, 480p, 720p
-- Grayscale (default, lower bitrate) or color streaming — switchable at runtime
-- Three transports: **UDP** (default), **TCP**, **UART**
-- Live encoder control from the receiver keyboard (resolution, CRF, FPS, pause, color)
-- Telemetry feedback — bitrate, FPS, frame count, drops — sent receiver → transmitter
-- ACK/NACK for every applied command
-- Multiplexed sideband channels alongside the video stream
-- Per-run timestamped log files under `logs/`
-- UART diagnostic tool (`uart_diag.py`) for pre-flight cable testing
+**Low-data-rate encoding**
+- H.264 (libx264) and H.265 (libx265) — `ultrafast` + `zerolatency` via PyAV
+- `--bpp` mode: bitrate scales with resolution so quality-per-pixel is constant
+- `--intra-refresh`: smooth bitrate + fast packet-loss recovery on lossy links
+- Motion gate (`--skip-threshold`): a parked rover idles near 0 kbps
+- Resolution presets from **64p** to 720p; grayscale (default) or color, live-switchable
+
+**GCS-side AI super-resolution**
+- ESPCN neural upscaling reconstructs a small frame to the operator's display
+  resolution (~5× sharper than interpolation, hundreds of fps on CPU)
+- Any received resolution scales to a fixed `--display-res`; falls back to Lanczos
+  if torch/model is unavailable
+
+**Link & control**
+- Three transports: **UDP** (default), **TCP**, **UART** (CRC16-CCITT framing)
+- Live encoder control from the receiver keyboard (resolution, CRF, FPS, color, pause)
+- Telemetry feedback (bitrate, FPS, frames, drops) + ACK/NACK over sideband channels
+- Per-run timestamped logs; `uart_diag.py` for pre-flight cable testing
 
 ---
 
