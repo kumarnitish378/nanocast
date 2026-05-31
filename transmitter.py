@@ -42,6 +42,8 @@ from app.logger    import RunLogger
 
 # ── Resolution presets ───────────────────────────────────────────────────────
 RESOLUTIONS: dict[str, tuple[int, int]] = {
+    '64p':  (96,   64),
+    '90p':  (160,  90),
     '140p': (256,  140),
     '240p': (426,  240),
     '360p': (640,  360),
@@ -51,19 +53,47 @@ RESOLUTIONS: dict[str, tuple[int, int]] = {
 
 
 # ── Encoder factory ───────────────────────────────────────────────────────────
-def create_encoder(width: int, height: int, fps: int, crf: int) -> av.CodecContext:
-    enc            = av.CodecContext.create('libx264', 'w')
-    enc.width      = width
-    enc.height     = height
-    enc.pix_fmt    = 'yuv420p'
-    enc.framerate  = fps
-    enc.time_base  = Fraction(1, fps)
-    enc.options    = {
-        'preset':      'ultrafast',
-        'tune':        'zerolatency',
-        'crf':         str(crf),
-        'x264-params': 'repeat-headers=1',
-    }
+def create_encoder(width: int, height: int, fps: int, crf: int = 28,
+                   codec: str = 'h264', bitrate: int | None = None,
+                   intra_refresh: bool = False) -> av.CodecContext:
+    """
+    Build an H.264 (libx264) or H.265 (libx265) encoder tuned for low-latency
+    streaming over a constrained radio link.
+
+    bitrate (kbps)  : if set → ABR with a hard VBV cap (predictable rate for a
+                      fixed pipe). If None → CRF quality mode (variable rate).
+    intra_refresh   : replace periodic keyframes with a moving refresh column —
+                      smooths the bitrate (no I-frame spikes) and recovers from
+                      packet loss without a full keyframe. Best for radio links.
+    """
+    enc_name  = 'libx265' if codec == 'h265' else 'libx264'
+    param_key = 'x265-params' if codec == 'h265' else 'x264-params'
+
+    enc           = av.CodecContext.create(enc_name, 'w')
+    enc.width     = width
+    enc.height    = height
+    enc.pix_fmt   = 'yuv420p'
+    enc.framerate = fps
+    enc.time_base = Fraction(1, fps)
+
+    params = ['repeat-headers=1']
+    opts   = {'preset': 'ultrafast', 'tune': 'zerolatency'}
+
+    if codec == 'h265':
+        params.append('log-level=error')   # silence x265's per-encoder banner
+
+    if bitrate:                                  # ABR — hard-cap for fixed pipe
+        enc.bit_rate = bitrate * 1000
+        params.append(f'vbv-maxrate={bitrate}')
+        params.append(f'vbv-bufsize={bitrate}')  # ~1 s buffer
+    else:                                        # CRF — quality target
+        opts['crf'] = str(crf)
+
+    if intra_refresh:
+        params.append('intra-refresh=1')
+
+    opts[param_key] = ':'.join(params)
+    enc.options     = opts
     enc.open()
     return enc
 
@@ -212,6 +242,21 @@ def main():
     parser.add_argument('--source',    default='0')
     parser.add_argument('--color',     action='store_true',
                         help='Stream in color (RGB). Default: grayscale.')
+    # Low-data-rate controls
+    parser.add_argument('--codec',     default='h264', choices=['h264', 'h265'],
+                        help='h265 is ~40-50%% smaller at the same quality.')
+    parser.add_argument('--bitrate',   type=int, default=None,
+                        help='Target bitrate cap in kbps (ABR/VBV). Overrides --crf '
+                             '— use this for a fixed radio pipe.')
+    parser.add_argument('--intra-refresh', action='store_true',
+                        help='Moving refresh instead of periodic keyframes: smooth '
+                             'bitrate + packet-loss resilience. Recommended for radio.')
+    parser.add_argument('--skip-threshold', type=float, default=0.0,
+                        help='Motion gate: skip frames whose mean pixel change is '
+                             'below this (0 = send every frame). Huge win for a '
+                             'parked/slow rover.')
+    parser.add_argument('--heartbeat', type=float, default=2.0,
+                        help='Max seconds between sent frames when motion-gated.')
     args = parser.parse_args()
 
     source = int(args.source) if args.source.isdigit() else args.source
@@ -245,18 +290,27 @@ def main():
         logger.close()
         return
 
+    enc_kwargs = dict(codec=args.codec, bitrate=args.bitrate,
+                      intra_refresh=args.intra_refresh)
+
     width, height = RESOLUTIONS[state.res]
-    encoder       = create_encoder(width, height, state.fps, state.crf)
+    encoder       = create_encoder(width, height, state.fps, state.crf, **enc_kwargs)
     stats                 = TxStats(logger=logger)
     pts                   = 0
     udp_keyframe_interval = 3.0
     t_last_keyframe       = time.time()
+    prev_gray             = None          # for motion-gated frame skip
+    t_last_sent           = time.time()
 
     color_mode = 'color' if state.color else 'gray'
-    print(f"[TX] {state.res} ({width}×{height})  fps={state.fps}  crf={state.crf}  mode={color_mode}")
+    rate_mode  = f'{args.bitrate}kbps ABR' if args.bitrate else f'crf={state.crf}'
+    print(f"[TX] {state.res} ({width}×{height})  fps={state.fps}  {rate_mode}  "
+          f"codec={args.codec}  mode={color_mode}  "
+          f"intra_refresh={args.intra_refresh}  skip={args.skip_threshold}")
     logger.info(f'[CONFIG]  transport={args.transport}  res={state.res}  '
-                f'fps={state.fps}  crf={state.crf}  mode={color_mode}  '
-                f'source={args.source}')
+                f'fps={state.fps}  {rate_mode}  codec={args.codec}  '
+                f'mode={color_mode}  intra_refresh={args.intra_refresh}  '
+                f'skip_threshold={args.skip_threshold}  source={args.source}')
     print("[TX] Streaming … (Ctrl-C to stop)\n")
 
     try:
@@ -275,7 +329,9 @@ def main():
                     for pkt in encoder.encode(None):   # flush
                         transport.send(bytes(pkt))
                     width, height = RESOLUTIONS[state.res]
-                    encoder       = create_encoder(width, height, state.fps, state.crf)
+                    encoder       = create_encoder(width, height, state.fps,
+                                                   state.crf, **enc_kwargs)
+                    prev_gray     = None   # force-send first frame after reinit
                     print(f"[TX] Encoder reinit: {state.res}  fps={state.fps}  crf={state.crf}")
 
             # ── Paused? ───────────────────────────────────────────────────────
@@ -288,18 +344,37 @@ def main():
             if not ret:
                 break
 
-            bgr = cv2.resize(bgr, (width, height))
+            bgr  = cv2.resize(bgr, (width, height))
+            gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)   # also used for motion gate
 
-            # ── Periodic keyframe for UDP late-join / resync ──────────────────
-            if args.transport == 'udp' and (time.time() - t_last_keyframe) >= udp_keyframe_interval:
+            # ── Periodic keyframe so UDP/lossy receivers can (re)sync ─────────
+            # Needed even with intra-refresh: the standalone decoder requires an
+            # IDR to enter the stream. Intra-refresh adds fast loss recovery
+            # *between* these keyframes.
+            if (args.transport == 'udp'
+                    and (time.time() - t_last_keyframe) >= udp_keyframe_interval):
                 state.force_keyframe = True
                 t_last_keyframe = time.time()
+
+            # ── Motion gate: skip near-identical frames (rover often static) ───
+            now = time.time()
+            heartbeat_due = (now - t_last_sent) >= args.heartbeat
+            if (args.skip_threshold > 0 and prev_gray is not None
+                    and not state.force_keyframe and not heartbeat_due):
+                if cv2.absdiff(gray, prev_gray).mean() < args.skip_threshold:
+                    # No meaningful change — hold the frame, send nothing.
+                    sleep = (1.0 / state.fps) - (time.time() - t_start)
+                    if sleep > 0:
+                        time.sleep(sleep)
+                    continue
+
+            prev_gray   = gray
+            t_last_sent = now
 
             # ── Encode (color or gray based on live state) ────────────────────
             if state.color:
                 av_frame = bgr_to_av_frame(bgr, pts, state.force_keyframe)
             else:
-                gray     = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
                 av_frame = gray_to_av_frame(gray, pts, state.force_keyframe)
             state.force_keyframe = False
             pts += 1

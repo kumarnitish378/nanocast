@@ -36,6 +36,8 @@ from app.logger    import RunLogger
 
 # ── Resolution presets ───────────────────────────────────────────────────────
 RESOLUTIONS: dict[str, tuple[int, int]] = {
+    '64p':  (96,   64),
+    '90p':  (160,  90),
     '140p': (256,  140),
     '240p': (426,  240),
     '360p': (640,  360),
@@ -45,8 +47,9 @@ RESOLUTIONS: dict[str, tuple[int, int]] = {
 
 
 # ── Decoder ───────────────────────────────────────────────────────────────────
-def create_decoder() -> av.CodecContext:
-    dec = av.CodecContext.create('h264', 'r')
+def create_decoder(codec: str = 'h264') -> av.CodecContext:
+    name = 'hevc' if codec == 'h265' else 'h264'
+    dec  = av.CodecContext.create(name, 'r')
     dec.open()
     return dec
 
@@ -152,6 +155,8 @@ def main():
     parser.add_argument('--rx-port',   default='COM2')
     parser.add_argument('--baud',      type=int, default=3_000_000)
     parser.add_argument('--no-rtscts', action='store_true')
+    # Codec — must match the transmitter
+    parser.add_argument('--codec',     default='h264', choices=['h264', 'h265'])
     # Display
     parser.add_argument('--res',       default=None, choices=list(RESOLUTIONS.keys()),
                         help='Force display resolution (optional)')
@@ -172,7 +177,7 @@ def main():
 
     logger       = RunLogger('rx')
     stats        = RxStats(logger=logger)
-    decoder      = create_decoder()
+    decoder      = create_decoder(args.codec)
 
     if args.transport == 'uart':
         logger.info(f'[CONFIG]  transport=uart  port={args.rx_port}  baud={args.baud}')
