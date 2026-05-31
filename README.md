@@ -81,7 +81,9 @@ python receiver.py   --transport uart --rx-port COM8 --baud 230400 --no-rtscts
 | `--fps` | `30` | Initial frame rate (1–60) |
 | `--crf` | `28` | Initial quality (0 = lossless → 51 = worst) |
 | `--codec` | `h264` | `h264` \| `h265` (h265 ≈ 40–50% smaller) |
-| `--bitrate` | — | Target bitrate cap in kbps (ABR/VBV). Overrides `--crf` — use for a fixed radio pipe |
+| `--bpp` | — | **Recommended.** Bits-per-pixel target (e.g. `0.12`); bitrate scales with resolution so quality-per-pixel is constant. Higher res → better quality *and* more data |
+| `--max-bitrate` | — | Hard ceiling (kbps) for `--bpp` mode — protects the radio budget |
+| `--bitrate` | — | Fixed bitrate cap in kbps (same at every resolution). ⚠ Higher res looks *worse* at a fixed bitrate; prefer `--bpp` |
 | `--intra-refresh` | off | Moving refresh for fast packet-loss recovery (keeps periodic keyframes for stream entry) |
 | `--skip-threshold` | `0` | Motion gate: skip near-identical frames (0 = send every frame). Parked rover ≈ 0 kbps |
 | `--heartbeat` | `2.0` | Max seconds between sent frames when motion-gated |
@@ -145,20 +147,37 @@ Send a tiny, bitrate-capped, loss-resilient stream and reconstruct quality at th
 GCS with neural super-resolution:
 
 ```bash
-# Rover — ~tens of kbps, capped so it never starves MAVLink telemetry
-python transmitter.py --res 90p --codec h264 --bitrate 25 --fps 15 \
+# Rover — bitrate scales with resolution (constant quality), ceiling protects link
+python transmitter.py --res 90p --codec h264 --bpp 0.12 --max-bitrate 150 --fps 15 \
                       --intra-refresh --skip-threshold 2.0
 
 # GCS — decode whatever arrives, reconstruct to a 480p display with ESPCN
 python receiver.py --codec h264 --upscale espcn --display-res 480p
 ```
 
-A parked/slow rover idles near 0 kbps (motion gate); while driving it stays
-capped at 25 kbps. ESPCN reconstructs ~5× sharper detail than plain interpolation.
+A parked/slow rover idles near 0 kbps (motion gate); while driving, bitrate scales
+with the chosen resolution and is capped at `--max-bitrate`. ESPCN reconstructs
+~5× sharper detail than plain interpolation.
 
 The transmitter resolution and the GCS display resolution are independent: the
 rover can drop to 64p to save bandwidth and the GCS still renders at your chosen
 size. Change rover resolution live with keys `1`–`4`; the GCS target stays fixed.
+
+### Bitrate, resolution & quality — the key trade-off
+
+At a **fixed** bitrate, raising resolution makes quality *worse*, because the same
+bits are spread over more pixels:
+
+```
+bits/pixel = bitrate ÷ (width × height × fps)
+  90p  @ 25 kbps = 0.116 bits/pixel   (clean)
+  480p @ 25 kbps = 0.004 bits/pixel   (blocky mush)
+```
+
+Use `--bpp` so bitrate tracks resolution and quality-per-pixel stays constant
+(`--bpp 0.12` @ 15 fps): 64p≈11 kbps, 90p≈26, 140p≈65, 240p≈184, 360p≈415 kbps.
+Within a 50–200 kbps radio budget, ~140p is the practical ceiling — so the winning
+strategy is **low resolution + AI upscaling**, not high resolution.
 
 ---
 

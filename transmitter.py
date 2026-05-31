@@ -246,8 +246,18 @@ def main():
     parser.add_argument('--codec',     default='h264', choices=['h264', 'h265'],
                         help='h265 is ~40-50%% smaller at the same quality.')
     parser.add_argument('--bitrate',   type=int, default=None,
-                        help='Target bitrate cap in kbps (ABR/VBV). Overrides --crf '
-                             '— use this for a fixed radio pipe.')
+                        help='Fixed bitrate cap in kbps (ABR/VBV), same at every '
+                             'resolution. Overrides --crf. NOTE: at a fixed bitrate, '
+                             'higher resolution looks WORSE (fewer bits/pixel) — '
+                             'prefer --bpp for resolution-coupled quality.')
+    parser.add_argument('--bpp',       type=float, default=None,
+                        help='Bits-per-pixel target (e.g. 0.12). Bitrate scales with '
+                             'resolution so quality-per-pixel stays constant: raising '
+                             'resolution raises quality AND data rate. Recommended. '
+                             'Overrides --bitrate and --crf.')
+    parser.add_argument('--max-bitrate', type=int, default=None,
+                        help='Hard ceiling in kbps for --bpp mode (protects the radio '
+                             'budget). Bitrate is clamped to this.')
     parser.add_argument('--intra-refresh', action='store_true',
                         help='Moving refresh instead of periodic keyframes: smooth '
                              'bitrate + packet-loss resilience. Recommended for radio.')
@@ -290,25 +300,43 @@ def main():
         logger.close()
         return
 
-    enc_kwargs = dict(codec=args.codec, bitrate=args.bitrate,
-                      intra_refresh=args.intra_refresh)
-
     width, height = RESOLUTIONS[state.res]
-    encoder       = create_encoder(width, height, state.fps, state.crf, **enc_kwargs)
-    stats                 = TxStats(logger=logger)
-    pts                   = 0
+
+    def effective_bitrate() -> int | None:
+        """kbps for the current resolution/fps. bpp mode scales with pixels."""
+        if args.bpp:
+            br = round(args.bpp * width * height * state.fps / 1000)
+            if args.max_bitrate:
+                br = min(br, args.max_bitrate)
+            return max(1, br)
+        return args.bitrate            # fixed cap, or None for CRF mode
+
+    def build_encoder():
+        br = effective_bitrate()
+        enc = create_encoder(width, height, state.fps, state.crf,
+                             codec=args.codec, bitrate=br,
+                             intra_refresh=args.intra_refresh)
+        return enc, br
+
+    def rate_label(br) -> str:
+        if args.bpp:    return f'{br}kbps (bpp={args.bpp})'
+        if args.bitrate: return f'{br}kbps ABR'
+        return f'crf={state.crf}'
+
+    encoder, cur_br      = build_encoder()
+    stats                = TxStats(logger=logger)
+    pts                  = 0
     udp_keyframe_interval = 3.0
-    t_last_keyframe       = time.time()
-    prev_gray             = None          # for motion-gated frame skip
-    t_last_sent           = time.time()
+    t_last_keyframe      = time.time()
+    prev_gray            = None           # for motion-gated frame skip
+    t_last_sent          = time.time()
 
     color_mode = 'color' if state.color else 'gray'
-    rate_mode  = f'{args.bitrate}kbps ABR' if args.bitrate else f'crf={state.crf}'
-    print(f"[TX] {state.res} ({width}×{height})  fps={state.fps}  {rate_mode}  "
+    print(f"[TX] {state.res} ({width}×{height})  fps={state.fps}  {rate_label(cur_br)}  "
           f"codec={args.codec}  mode={color_mode}  "
           f"intra_refresh={args.intra_refresh}  skip={args.skip_threshold}")
     logger.info(f'[CONFIG]  transport={args.transport}  res={state.res}  '
-                f'fps={state.fps}  {rate_mode}  codec={args.codec}  '
+                f'fps={state.fps}  {rate_label(cur_br)}  codec={args.codec}  '
                 f'mode={color_mode}  intra_refresh={args.intra_refresh}  '
                 f'skip_threshold={args.skip_threshold}  source={args.source}')
     print("[TX] Streaming … (Ctrl-C to stop)\n")
@@ -328,11 +356,11 @@ def main():
                 if reinit:
                     for pkt in encoder.encode(None):   # flush
                         transport.send(bytes(pkt))
-                    width, height = RESOLUTIONS[state.res]
-                    encoder       = create_encoder(width, height, state.fps,
-                                                   state.crf, **enc_kwargs)
-                    prev_gray     = None   # force-send first frame after reinit
-                    print(f"[TX] Encoder reinit: {state.res}  fps={state.fps}  crf={state.crf}")
+                    width, height   = RESOLUTIONS[state.res]
+                    encoder, cur_br = build_encoder()
+                    prev_gray       = None   # force-send first frame after reinit
+                    print(f"[TX] Encoder reinit: {state.res}  fps={state.fps}  "
+                          f"{rate_label(cur_br)}")
 
             # ── Paused? ───────────────────────────────────────────────────────
             if state.paused:
