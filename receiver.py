@@ -33,6 +33,7 @@ from transport import get_transport
 from app.command   import CommandSender
 from app.telemetry import TelemetrySender
 from app.logger    import RunLogger
+from app.upscaler  import Upscaler
 
 # ── Resolution presets ───────────────────────────────────────────────────────
 RESOLUTIONS: dict[str, tuple[int, int]] = {
@@ -157,6 +158,12 @@ def main():
     parser.add_argument('--no-rtscts', action='store_true')
     # Codec — must match the transmitter
     parser.add_argument('--codec',     default='h264', choices=['h264', 'h265'])
+    # AI super-resolution (GCS-side; reconstructs detail from the tiny frame)
+    parser.add_argument('--upscale',   default='none',
+                        choices=['none', 'lanczos', 'espcn'],
+                        help='Upscale decoded frames. espcn = neural SR (torch).')
+    parser.add_argument('--sr-scale',  type=int, default=4, choices=[2, 3, 4],
+                        help='Upscale factor for --upscale (default 4).')
     # Display
     parser.add_argument('--res',       default=None, choices=list(RESOLUTIONS.keys()),
                         help='Force display resolution (optional)')
@@ -178,11 +185,14 @@ def main():
     logger       = RunLogger('rx')
     stats        = RxStats(logger=logger)
     decoder      = create_decoder(args.codec)
+    upscaler     = Upscaler(args.upscale, args.sr_scale)
 
     if args.transport == 'uart':
-        logger.info(f'[CONFIG]  transport=uart  port={args.rx_port}  baud={args.baud}')
+        logger.info(f'[CONFIG]  transport=uart  port={args.rx_port}  baud={args.baud}  '
+                    f'codec={args.codec}  upscale={upscaler.label()}')
     else:
-        logger.info(f'[CONFIG]  transport={args.transport}  host={args.host}:{args.port}')
+        logger.info(f'[CONFIG]  transport={args.transport}  host={args.host}:{args.port}  '
+                    f'codec={args.codec}  upscale={upscaler.label()}')
 
     # Wire up sideband app layer
     cmd_sender   = CommandSender(transport)
@@ -202,6 +212,9 @@ def main():
 
             frames = decode_packet(decoder, raw)
             for frame in frames:
+
+                # AI / classical upscaling (reconstruct detail from tiny frame)
+                frame = upscaler.upscale(frame)
 
                 # Optional force resolution
                 if args.res:

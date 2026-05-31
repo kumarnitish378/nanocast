@@ -2,3 +2,7 @@ opencv-python
 av
 pyserial
 numpy
+
+# Optional — only needed for receiver AI super-resolution (--upscale espcn).
+# CPU build is sufficient (ESPCN runs at hundreds of fps at 90p).
+# torch

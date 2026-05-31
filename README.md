@@ -77,9 +77,14 @@ python receiver.py   --transport uart --rx-port COM8 --baud 230400 --no-rtscts
 | `--tx-port` | `COM1` | Serial port (UART) |
 | `--baud` | `3000000` | Baud rate (UART) |
 | `--no-rtscts` | off | Disable RTS/CTS hardware flow control |
-| `--res` | `480p` | Initial resolution: `140p` `240p` `360p` `480p` `720p` |
+| `--res` | `480p` | Initial resolution: `64p` `90p` `140p` `240p` `360p` `480p` `720p` |
 | `--fps` | `30` | Initial frame rate (1–60) |
 | `--crf` | `28` | Initial quality (0 = lossless → 51 = worst) |
+| `--codec` | `h264` | `h264` \| `h265` (h265 ≈ 40–50% smaller) |
+| `--bitrate` | — | Target bitrate cap in kbps (ABR/VBV). Overrides `--crf` — use for a fixed radio pipe |
+| `--intra-refresh` | off | Moving refresh for fast packet-loss recovery (keeps periodic keyframes for stream entry) |
+| `--skip-threshold` | `0` | Motion gate: skip near-identical frames (0 = send every frame). Parked rover ≈ 0 kbps |
+| `--heartbeat` | `2.0` | Max seconds between sent frames when motion-gated |
 | `--source` | `0` | Webcam index or video file path |
 | `--color` | off | Start in color mode (default: grayscale) |
 
@@ -93,6 +98,9 @@ python receiver.py   --transport uart --rx-port COM8 --baud 230400 --no-rtscts
 | `--rx-port` | `COM2` | Serial port (UART) |
 | `--baud` | `3000000` | Baud rate (UART) |
 | `--no-rtscts` | off | Disable RTS/CTS hardware flow control |
+| `--codec` | `h264` | Must match the transmitter |
+| `--upscale` | `none` | `none` \| `lanczos` \| `espcn` (neural SR) |
+| `--sr-scale` | `4` | Upscale factor: `2` `3` `4` |
 | `--res` | — | Force display resolution (optional) |
 | `--no-overlay` | off | Disable on-screen stats and hint bar |
 
@@ -132,17 +140,72 @@ Use `--no-rtscts` if your USB-UART adapter only has TX/RX/GND wired (no RTS/CTS)
 
 ---
 
+## Minimum-Bitrate Profile (rover → GCS radio link)
+
+Send a tiny, bitrate-capped, loss-resilient stream and reconstruct quality at the
+GCS with neural super-resolution:
+
+```bash
+# Rover — ~tens of kbps, capped so it never starves MAVLink telemetry
+python transmitter.py --res 90p --codec h264 --bitrate 25 --fps 15 \
+                      --intra-refresh --skip-threshold 2.0
+
+# GCS — decode 90p, upscale ×4 to ~360p with ESPCN
+python receiver.py --codec h264 --upscale espcn --sr-scale 4
+```
+
+A parked/slow rover idles near 0 kbps (motion gate); while driving it stays
+capped at 25 kbps. ESPCN reconstructs ~5× sharper detail than plain interpolation.
+
+---
+
+## AI Super-Resolution (GCS-side)
+
+The rover sends small frames to save bandwidth; the GCS reconstructs a larger,
+sharper image. This stage is purely receiver-side — it never touches the radio
+path or the transmitter.
+
+```bash
+# One-time: fetch the pretrained ESPCN models into models/
+python tools/get_sr_models.py
+
+# Optional (only for --upscale espcn): CPU build is enough
+pip install torch
+
+python receiver.py --upscale espcn --sr-scale 4   # neural SR
+python receiver.py --upscale lanczos --sr-scale 4 # classical (no torch needed)
+```
+
+| Mode | Needs | Quality | Speed (CPU, 90p→360p) |
+|---|---|---|---|
+| `none` | — | passthrough | — |
+| `lanczos` | — | soft upscale | instant |
+| `espcn` | torch + model | ~5× sharper detail | hundreds of fps |
+
+ESPCN runs in PyTorch; its weights are extracted from the OpenCV `ESPCN_x*.pb`
+files (this sidesteps an OpenCV 4.13 TensorFlow-import bug). If torch or the
+model file is missing, the receiver automatically falls back to Lanczos.
+
+> ⚠ Super-resolution reconstructs *plausible* detail and can invent texture that
+> is not really there. Treat the upscaled view as enhanced situational awareness,
+> not ground truth for navigation decisions.
+
+---
+
 ## Architecture
 
 ```
 nanocast/
 ├── transmitter.py        entry point — encode, send, apply commands
-├── receiver.py           entry point — decode, display, send commands
+├── receiver.py           entry point — decode, upscale, display, send commands
 ├── uart_diag.py          UART cable diagnostic (list / loopback / link)
+├── tools/
+│   └── get_sr_models.py  download pretrained ESPCN super-resolution models
 ├── app/
 │   ├── protocol.py       JSON sideband messages, channel IDs, command names
 │   ├── command.py        StreamState, StreamController, CommandReceiver, CommandSender
 │   ├── telemetry.py      TelemetrySender (RX→TX thread), TelemetryReceiver (TX)
+│   ├── upscaler.py       GCS-side super-resolution (none / lanczos / espcn)
 │   └── logger.py         Per-run timestamped file logger
 └── transport/
     ├── __init__.py       get_transport(type, mode, **kwargs) factory
