@@ -99,9 +99,8 @@ python receiver.py   --transport uart --rx-port COM8 --baud 230400 --no-rtscts
 | `--baud` | `3000000` | Baud rate (UART) |
 | `--no-rtscts` | off | Disable RTS/CTS hardware flow control |
 | `--codec` | `h264` | Must match the transmitter |
-| `--upscale` | `none` | `none` \| `lanczos` \| `espcn` (neural SR) |
-| `--sr-scale` | `4` | Upscale factor: `2` `3` `4` |
-| `--res` | — | Force display resolution (optional) |
+| `--upscale` | `none` | Scaling method to reach `--display-res`: `none` \| `lanczos` \| `espcn` |
+| `--display-res` | `480p` | GCS display resolution — any received frame is scaled to this |
 | `--no-overlay` | off | Disable on-screen stats and hint bar |
 
 ---
@@ -150,12 +149,16 @@ GCS with neural super-resolution:
 python transmitter.py --res 90p --codec h264 --bitrate 25 --fps 15 \
                       --intra-refresh --skip-threshold 2.0
 
-# GCS — decode 90p, upscale ×4 to ~360p with ESPCN
-python receiver.py --codec h264 --upscale espcn --sr-scale 4
+# GCS — decode whatever arrives, reconstruct to a 480p display with ESPCN
+python receiver.py --codec h264 --upscale espcn --display-res 480p
 ```
 
 A parked/slow rover idles near 0 kbps (motion gate); while driving it stays
 capped at 25 kbps. ESPCN reconstructs ~5× sharper detail than plain interpolation.
+
+The transmitter resolution and the GCS display resolution are independent: the
+rover can drop to 64p to save bandwidth and the GCS still renders at your chosen
+size. Change rover resolution live with keys `1`–`4`; the GCS target stays fixed.
 
 ---
 
@@ -172,13 +175,17 @@ python tools/get_sr_models.py
 # Optional (only for --upscale espcn): CPU build is enough
 pip install torch
 
-python receiver.py --upscale espcn --sr-scale 4   # neural SR
-python receiver.py --upscale lanczos --sr-scale 4 # classical (no torch needed)
+python receiver.py --upscale espcn   --display-res 480p  # neural SR
+python receiver.py --upscale lanczos --display-res 480p  # classical (no torch)
 ```
 
-| Mode | Needs | Quality | Speed (CPU, 90p→360p) |
+Any received resolution is scaled to `--display-res`. For ESPCN the model scale
+(×2/×3/×4) is chosen automatically to overshoot the target, then resized to the
+exact display size; if a frame already exceeds the target it is downscaled.
+
+| Mode | Needs | Quality | Speed (CPU, 90p→480p) |
 |---|---|---|---|
-| `none` | — | passthrough | — |
+| `none` | — | native (no scaling) | — |
 | `lanczos` | — | soft upscale | instant |
 | `espcn` | torch + model | ~5× sharper detail | hundreds of fps |
 

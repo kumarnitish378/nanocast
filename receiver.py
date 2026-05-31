@@ -158,16 +158,16 @@ def main():
     parser.add_argument('--no-rtscts', action='store_true')
     # Codec — must match the transmitter
     parser.add_argument('--codec',     default='h264', choices=['h264', 'h265'])
-    # AI super-resolution (GCS-side; reconstructs detail from the tiny frame)
-    parser.add_argument('--upscale',   default='none',
+    # GCS display resolution — any received frame is scaled to this size
+    parser.add_argument('--upscale',     default='none',
                         choices=['none', 'lanczos', 'espcn'],
-                        help='Upscale decoded frames. espcn = neural SR (torch).')
-    parser.add_argument('--sr-scale',  type=int, default=4, choices=[2, 3, 4],
-                        help='Upscale factor for --upscale (default 4).')
-    # Display
-    parser.add_argument('--res',       default=None, choices=list(RESOLUTIONS.keys()),
-                        help='Force display resolution (optional)')
-    parser.add_argument('--no-overlay', action='store_true')
+                        help='Scaling method to reach --display-res. '
+                             'espcn = neural SR (torch).')
+    parser.add_argument('--display-res', default='480p',
+                        choices=list(RESOLUTIONS.keys()),
+                        help='GCS display resolution (default 480p). Used when '
+                             '--upscale is not none.')
+    parser.add_argument('--no-overlay',  action='store_true')
     args = parser.parse_args()
 
     if args.transport == 'uart':
@@ -185,7 +185,8 @@ def main():
     logger       = RunLogger('rx')
     stats        = RxStats(logger=logger)
     decoder      = create_decoder(args.codec)
-    upscaler     = Upscaler(args.upscale, args.sr_scale)
+    target_wh    = RESOLUTIONS[args.display_res] if args.upscale != 'none' else None
+    upscaler     = Upscaler(args.upscale, target_wh)
 
     if args.transport == 'uart':
         logger.info(f'[CONFIG]  transport=uart  port={args.rx_port}  baud={args.baud}  '
@@ -213,14 +214,9 @@ def main():
             frames = decode_packet(decoder, raw)
             for frame in frames:
 
-                # AI / classical upscaling (reconstruct detail from tiny frame)
+                # Scale any received resolution to the GCS display resolution
+                # (espcn = neural detail reconstruction; lanczos = classical).
                 frame = upscaler.upscale(frame)
-
-                # Optional force resolution
-                if args.res:
-                    tw, th = RESOLUTIONS[args.res]
-                    if frame.shape[1] != tw or frame.shape[0] != th:
-                        frame = cv2.resize(frame, (tw, th))
 
                 if not args.no_overlay:
                     frame = draw_overlay(frame, stats, hint, paused)
