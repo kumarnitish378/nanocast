@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Get-ChildItem -Path \"d:\\\\lowDataRateVideoTransportLayer\" -Force -Recurse | Where-Object { -not $_.PSIsContainer } | Select-Object Name, Length, LastWriteTime)"
+    ]
+  }
+}
