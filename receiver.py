@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Nitish NS <nitish.ns378@gmail.com>. All rights reserved.
+# Unauthorized copying, modification, or distribution of this file is prohibited.
 """
 H.264 Video Receiver  —  with telemetry reporting + live command control.
 
@@ -30,6 +32,7 @@ import numpy as np
 from transport import get_transport
 from app.command   import CommandSender
 from app.telemetry import TelemetrySender
+from app.logger    import RunLogger
 
 # ── Resolution presets ───────────────────────────────────────────────────────
 RESOLUTIONS: dict[str, tuple[int, int]] = {
@@ -52,10 +55,7 @@ def decode_packet(decoder: av.CodecContext, raw: bytes) -> list[np.ndarray]:
     frames = []
     try:
         for av_frame in decoder.decode(av.Packet(raw)):
-            bgr  = av_frame.to_ndarray(format='bgr24')
-            gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-            bgr  = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-            frames.append(bgr)
+            frames.append(av_frame.to_ndarray(format='bgr24'))
     except av.InvalidDataError:
         # UDP may deliver P-frames before the first I-frame — skip until resync
         pass
@@ -64,20 +64,26 @@ def decode_packet(decoder: av.CodecContext, raw: bytes) -> list[np.ndarray]:
 
 # ── RX statistics ─────────────────────────────────────────────────────────────
 class RxStats:
-    def __init__(self, interval: float = 1.0):
-        self._interval  = interval
-        self._bytes     = 0
-        self._frames    = 0
-        self._t0        = time.time()
-        self.kbps       = 0.0
-        self.fps        = 0.0
-        self.total_pkts = 0
+    def __init__(self, interval: float = 1.0, logger=None):
+        self._interval      = interval
+        self._bytes         = 0
+        self._frames        = 0
+        self._total_bytes   = 0
+        self._total_frames  = 0
+        self._t_start       = time.time()   # never reset — used for summary
+        self._t0            = self._t_start
+        self._logger        = logger
+        self.kbps           = 0.0
+        self.fps            = 0.0
+        self.total_pkts     = 0
         self.frames_dropped = 0
 
     def update(self, nbytes: int) -> None:
-        self._bytes     += nbytes
-        self._frames    += 1
-        self.total_pkts += 1
+        self._bytes        += nbytes
+        self._frames       += 1
+        self._total_bytes  += nbytes
+        self._total_frames += 1
+        self.total_pkts    += 1
 
     def tick(self) -> bool:
         now     = time.time()
@@ -91,7 +97,18 @@ class RxStats:
         self._t0     = now
         print(f"[RX] {self.kbps:8.1f} kbps  |  {self.fps:5.1f} fps  "
               f"|  frames={self.total_pkts}")
+        if self._logger:
+            self._logger.info(f'[STATS]  kbps={self.kbps:.1f}  fps={self.fps:.1f}  '
+                              f'frames={self.total_pkts}  dropped={self.frames_dropped}')
         return True
+
+    def summary(self) -> str:
+        elapsed  = time.time() - self._t_start
+        avg_kbps = (self._total_bytes * 8) / 1000 / max(elapsed, 1)
+        return (f'total_frames={self._total_frames}  '
+                f'total_MB={self._total_bytes/1e6:.2f}  '
+                f'avg_kbps={avg_kbps:.1f}  '
+                f'dropped={self.frames_dropped}')
 
 
 # ── Overlay rendering ─────────────────────────────────────────────────────────
@@ -127,7 +144,7 @@ def draw_overlay(frame: np.ndarray, stats: RxStats,
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(description='H.264 Video Receiver')
-    parser.add_argument('--transport', default='tcp', choices=['tcp', 'udp', 'uart'])
+    parser.add_argument('--transport', default='udp', choices=['tcp', 'udp', 'uart'])
     # TCP / UDP
     parser.add_argument('--host',      default='127.0.0.1')
     parser.add_argument('--port',      type=int, default=5000)
@@ -153,11 +170,17 @@ def main():
         rx_port=args.rx_port, baud=args.baud, rtscts=not args.no_rtscts,
     )
 
-    stats      = RxStats()
-    decoder    = create_decoder()
+    logger       = RunLogger('rx')
+    stats        = RxStats(logger=logger)
+    decoder      = create_decoder()
+
+    if args.transport == 'uart':
+        logger.info(f'[CONFIG]  transport=uart  port={args.rx_port}  baud={args.baud}')
+    else:
+        logger.info(f'[CONFIG]  transport={args.transport}  host={args.host}:{args.port}')
 
     # Wire up sideband app layer
-    cmd_sender  = CommandSender(transport)
+    cmd_sender   = CommandSender(transport)
     telem_sender = TelemetrySender(transport, stats, interval=1.0)
     telem_sender.start()
 
@@ -198,8 +221,10 @@ def main():
 
     except KeyboardInterrupt:
         print("\n[RX] Interrupted.")
+        logger.info('[EVENT]  KeyboardInterrupt')
     except ConnectionError as e:
         print(f"[RX] Connection lost: {e}")
+        logger.info(f'[EVENT]  ConnectionError: {e}')
     finally:
         telem_sender.stop()
         try:
@@ -208,6 +233,7 @@ def main():
             pass
         cv2.destroyAllWindows()
         transport.close()
+        logger.close(stats.summary())
         print("[RX] Done.")
 
 

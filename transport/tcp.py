@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Nitish NS <nitish.ns378@gmail.com>. All rights reserved.
+# Unauthorized copying, modification, or distribution of this file is prohibited.
 """
 TCP transport with sideband.
 
@@ -107,15 +109,27 @@ class TCPSender(TransportSender):
     def __init__(self, host: str, port: int):
         vid_srv = _make_server(host, port)
         sb_srv  = _make_server(host, port + 1)
-        print(f"[TCP-TX] Listening on {host}:{port} — waiting for receiver …")
+        vid_srv.settimeout(1.0)
+        sb_srv.settimeout(1.0)
+        print(f"[TCP-TX] Listening on {host}:{port} — waiting for receiver … (Ctrl-C to abort)")
 
-        conn, (rx_host, _) = vid_srv.accept()
+        conn = None
+        while conn is None:
+            try:
+                conn, (rx_host, _) = vid_srv.accept()
+            except socket.timeout:
+                continue
         conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         vid_srv.close()
         self._conn = conn
         print(f"[TCP-TX] Receiver connected from {rx_host}")
 
-        sb_conn, _ = sb_srv.accept()
+        sb_conn = None
+        while sb_conn is None:
+            try:
+                sb_conn, _ = sb_srv.accept()
+            except socket.timeout:
+                continue
         sb_conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         sb_srv.close()
 

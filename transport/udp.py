@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Nitish NS <nitish.ns378@gmail.com>. All rights reserved.
+# Unauthorized copying, modification, or distribution of this file is prohibited.
 """
 transport/udp.py — UDP video transport with sideband.
 
@@ -15,7 +17,7 @@ Behaviour:
   - No connection handshake — start either side first.
   - UDPReceiver learns the transmitter's address from the first video datagram.
   - Packets may be lost or reordered; the H.264 decoder handles this gracefully.
-  - Max safe payload ~65 KB per datagram (UDP limit). H.264 at 140p–480p is
+  - Max safe payload ~65 KB per datagram (UDP limit). H.264 at 140p-480p is
     well within this; very large I-frames at 720p may rarely be fragmented by
     the OS and silently dropped.
 """

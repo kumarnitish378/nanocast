@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Nitish NS <nitish.ns378@gmail.com>. All rights reserved.
+# Unauthorized copying, modification, or distribution of this file is prohibited.
 """
 app/command.py — Live stream control over side-channel.
 
@@ -20,6 +22,7 @@ class StreamState:
     res           : str  = '480p'
     fps           : int  = 30
     crf           : int  = 28
+    color         : bool = False
     paused        : bool = False
     stop          : bool = False
     force_keyframe: bool = False
@@ -114,6 +117,7 @@ class CommandSender:
     def __init__(self, transport):
         self._transport = transport
         self._paused    = False
+        self._color     = False  # local mirror for toggle
         self._crf       = 28     # local mirror so +/- are relative
 
         transport.on_side_channel(proto.CH_ACK, self._on_ack)
@@ -148,6 +152,11 @@ class CommandSender:
             self.send(proto.CMD_SET_CRF, self._crf)
             return True
 
+        if key == ord('c'):
+            self._color = not self._color
+            self.send(proto.CMD_SET_COLOR, self._color)
+            return True
+
         if key == ord('k'):
             self.send(proto.CMD_KEYFRAME)
             return True
@@ -165,7 +174,7 @@ class CommandSender:
 
     @staticmethod
     def hint_text() -> str:
-        return "[1-4]:res  [+/-]:quality  [k]:keyframe  [p]:pause  [q]:quit"
+        return "[1-4]:res  [+/-]:quality  [c]:color/gray  [k]:keyframe  [p]:pause  [q]:quit"
 
     # ── ACK handler ───────────────────────────────────────────────────────────
 

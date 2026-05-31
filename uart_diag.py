@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Nitish NS <nitish.ns378@gmail.com>. All rights reserved.
+# Unauthorized copying, modification, or distribution of this file is prohibited.
 """
 UART diagnostic script - run before starting the video pipeline.
 

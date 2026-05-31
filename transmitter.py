@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright (c) 2026 Nitish NS <nitish.ns378@gmail.com>. All rights reserved.
+# Unauthorized copying, modification, or distribution of this file is prohibited.
 """
 H.264 Video Transmitter  —  with live command control + telemetry display.
 
@@ -31,11 +33,12 @@ from transport import get_transport
 from app.protocol import (
     CH_ACK,
     CMD_SET_RES, CMD_SET_CRF, CMD_SET_FPS,
-    CMD_KEYFRAME, CMD_PAUSE, CMD_RESUME, CMD_STOP,
+    CMD_KEYFRAME, CMD_SET_COLOR, CMD_PAUSE, CMD_RESUME, CMD_STOP,
 )
 from app import protocol as proto
 from app.command   import StreamController, CommandReceiver, StreamState
 from app.telemetry import TelemetryReceiver
+from app.logger    import RunLogger
 
 # ── Resolution presets ───────────────────────────────────────────────────────
 RESOLUTIONS: dict[str, tuple[int, int]] = {
@@ -79,16 +82,30 @@ def gray_to_av_frame(gray, pts: int,
     return frame
 
 
+def bgr_to_av_frame(bgr, pts: int,
+                    force_keyframe: bool = False) -> av.VideoFrame:
+    frame     = av.VideoFrame.from_ndarray(bgr, format='bgr24')
+    frame.pts = pts
+    if force_keyframe:
+        frame.pict_type = 1  # AV_PICTURE_TYPE_I
+    return frame
+
+
 # ── TX stats ──────────────────────────────────────────────────────────────────
 class TxStats:
-    def __init__(self, interval: float = 1.0):
-        self._interval = interval
-        self._bytes = self._frames = 0
-        self._t0    = time.time()
+    def __init__(self, interval: float = 1.0, logger=None):
+        self._interval    = interval
+        self._bytes       = self._frames = 0
+        self._total_bytes = self._total_frames = 0
+        self._t_start     = time.time()   # never reset — used for summary
+        self._t0          = self._t_start
+        self._logger      = logger
 
     def update(self, sent: int) -> None:
-        self._bytes  += sent
-        self._frames += 1
+        self._bytes        += sent
+        self._frames       += 1
+        self._total_bytes  += sent
+        self._total_frames += 1
 
     def tick(self, label: str) -> None:
         now     = time.time()
@@ -97,9 +114,19 @@ class TxStats:
             return
         kbps = (self._bytes * 8) / 1000 / elapsed
         fps  = self._frames / elapsed
-        print(f"[TX] {label}  |  {kbps:8.1f} kbps  |  {fps:5.1f} fps")
+        line = f"[TX] {label}  |  {kbps:8.1f} kbps  |  {fps:5.1f} fps"
+        print(line)
+        if self._logger:
+            self._logger.info(f'[STATS]  {label}  kbps={kbps:.1f}  fps={fps:.1f}')
         self._bytes = self._frames = 0
         self._t0    = now
+
+    def summary(self) -> str:
+        elapsed  = time.time() - self._t_start
+        avg_kbps = (self._total_bytes * 8) / 1000 / max(elapsed, 1)
+        return (f'total_frames={self._total_frames}  '
+                f'total_MB={self._total_bytes/1e6:.2f}  '
+                f'avg_kbps={avg_kbps:.1f}')
 
 
 # ── Command application ───────────────────────────────────────────────────────
@@ -138,6 +165,10 @@ def apply_command(msg: dict, state: StreamState,
         except (TypeError, ValueError):
             detail = "invalid value"
 
+    elif cmd == CMD_SET_COLOR:
+        state.color = bool(value)
+        detail = 'color' if state.color else 'gray'
+
     elif cmd == CMD_KEYFRAME:
         state.force_keyframe = True
         detail = "scheduled"
@@ -169,7 +200,7 @@ def main():
     parser.add_argument('--res',       default='480p', choices=RESOLUTIONS.keys())
     parser.add_argument('--fps',       type=int, default=30)
     parser.add_argument('--crf',       type=int, default=28)
-    parser.add_argument('--transport', default='tcp', choices=['tcp', 'udp', 'uart'])
+    parser.add_argument('--transport', default='udp', choices=['tcp', 'udp', 'uart'])
     # TCP / UDP
     parser.add_argument('--host',      default='127.0.0.1')
     parser.add_argument('--port',      type=int, default=5000)
@@ -177,8 +208,10 @@ def main():
     parser.add_argument('--tx-port',   default='COM1')
     parser.add_argument('--baud',      type=int, default=3_000_000)
     parser.add_argument('--no-rtscts', action='store_true')
-    # Source
+    # Source / color mode
     parser.add_argument('--source',    default='0')
+    parser.add_argument('--color',     action='store_true',
+                        help='Stream in color (RGB). Default: grayscale.')
     args = parser.parse_args()
 
     source = int(args.source) if args.source.isdigit() else args.source
@@ -195,8 +228,11 @@ def main():
         tx_port=args.tx_port, baud=args.baud, rtscts=not args.no_rtscts,
     )
 
-    state      = StreamState(res=args.res, fps=args.fps, crf=args.crf)
+    state      = StreamState(res=args.res, fps=args.fps, crf=args.crf,
+                              color=args.color)
     controller = StreamController(state)
+
+    logger = RunLogger('tx')
 
     # Wire up sideband app layer
     CommandReceiver(transport, controller)
@@ -206,16 +242,21 @@ def main():
     if not cap.isOpened():
         print(f"[TX] ERROR: cannot open source '{args.source}'")
         transport.close()
+        logger.close()
         return
 
     width, height = RESOLUTIONS[state.res]
     encoder       = create_encoder(width, height, state.fps, state.crf)
-    stats            = TxStats()
-    pts              = 0
-    udp_keyframe_interval = 3.0   # force I-frame every 3 s for UDP late-join resync
-    t_last_keyframe  = time.time()
+    stats                 = TxStats(logger=logger)
+    pts                   = 0
+    udp_keyframe_interval = 3.0
+    t_last_keyframe       = time.time()
 
-    print(f"[TX] {state.res} ({width}×{height})  fps={state.fps}  crf={state.crf}")
+    color_mode = 'color' if state.color else 'gray'
+    print(f"[TX] {state.res} ({width}×{height})  fps={state.fps}  crf={state.crf}  mode={color_mode}")
+    logger.info(f'[CONFIG]  transport={args.transport}  res={state.res}  '
+                f'fps={state.fps}  crf={state.crf}  mode={color_mode}  '
+                f'source={args.source}')
     print("[TX] Streaming … (Ctrl-C to stop)\n")
 
     try:
@@ -225,6 +266,9 @@ def main():
             # ── Poll pending commands ─────────────────────────────────────────
             while (msg := controller.poll()) is not None:
                 reinit, running = apply_command(msg, state, transport)
+                logger.info(f'[CMD]   {msg.get("cmd")}={msg.get("value")}  '
+                            f'mode={"color" if state.color else "gray"}  '
+                            f'res={state.res}  crf={state.crf}  fps={state.fps}')
                 if not running:
                     return
                 if reinit:
@@ -244,16 +288,19 @@ def main():
             if not ret:
                 break
 
-            bgr  = cv2.resize(bgr, (width, height))
-            gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+            bgr = cv2.resize(bgr, (width, height))
 
             # ── Periodic keyframe for UDP late-join / resync ──────────────────
             if args.transport == 'udp' and (time.time() - t_last_keyframe) >= udp_keyframe_interval:
                 state.force_keyframe = True
                 t_last_keyframe = time.time()
 
-            # ── Encode ────────────────────────────────────────────────────────
-            av_frame = gray_to_av_frame(gray, pts, state.force_keyframe)
+            # ── Encode (color or gray based on live state) ────────────────────
+            if state.color:
+                av_frame = bgr_to_av_frame(bgr, pts, state.force_keyframe)
+            else:
+                gray     = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+                av_frame = gray_to_av_frame(gray, pts, state.force_keyframe)
             state.force_keyframe = False
             pts += 1
 
@@ -270,12 +317,14 @@ def main():
 
     except KeyboardInterrupt:
         print("\n[TX] Interrupted.")
+        logger.info('[EVENT]  KeyboardInterrupt')
     finally:
         print("[TX] Flushing …")
         for pkt in encoder.encode(None):
             transport.send(bytes(pkt))
         cap.release()
         transport.close()
+        logger.close(stats.summary())
         print("[TX] Done.")
 
 

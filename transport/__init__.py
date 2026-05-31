@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Nitish NS <nitish.ns378@gmail.com>. All rights reserved.
+# Unauthorized copying, modification, or distribution of this file is prohibited.
 from transport.tcp  import TCPSender,  TCPReceiver
 from transport.uart import UARTSender, UARTReceiver
 from transport.udp  import UDPSender,  UDPReceiver

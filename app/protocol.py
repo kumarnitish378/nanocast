@@ -1,3 +1,5 @@
+# Copyright (c) 2026 Nitish NS <nitish.ns378@gmail.com>. All rights reserved.
+# Unauthorized copying, modification, or distribution of this file is prohibited.
 """
 app/protocol.py — Sideband message protocol (JSON over side-channel).
 
@@ -26,6 +28,7 @@ CMD_SET_RES   = 'set_res'    # value: '240p' | '360p' | '480p' | '720p'
 CMD_SET_CRF   = 'set_crf'    # value: int  0–51
 CMD_SET_FPS   = 'set_fps'    # value: int  5–60
 CMD_KEYFRAME  = 'keyframe'   # force next I-frame
+CMD_SET_COLOR = 'set_color'  # value: True (color) | False (gray)
 CMD_PAUSE     = 'pause'
 CMD_RESUME    = 'resume'
 CMD_STOP      = 'stop'
